@@ -18,7 +18,7 @@ Key components:
 - **`fetch_binance_data.py`**: Utilities to download historical price and funding rate data from Binance. (for `manual_funding_arb_allocation.py` only)
 - **`generate_report.py`**: Generates performance metrics and reports from backtest results.
 - **`funding_arb_walkforward.ipynb`**: Notebook for running walk-forward backtests.
-- **`beta_neu_fund_arb_EDA.ipynb`**: Exploratory data analysis notebook.
+- **`beta_neu_fund_arb_EDA.ipynb`**: Exploratory data analysis notebook. *Note: This notebook is for exploratory purposes and may use simplified or different beta calculation methods/parameters compared to the main `funding_arb_framework.py` for clarity and rapid prototyping. It's not intended for direct strategy execution.*
 
 ## Installation
 
@@ -76,6 +76,34 @@ This script reads `detailed_records_framework_wf.csv` (by default) and produces:
 - `strategy_report.txt`: A text summary of returns, Sharpe ratio, drawdowns, and risk metrics.
 - `daily_strategy_metrics.csv`: Aggregated daily performance stats.
 - Plots/Figures in the `figures/` directory.
+
+### 5. Understanding the Figures
+
+The `generate_report.py` script produces several visualizations in the `figures/` directory to help diagnose strategy performance:
+
+- **`cumulative_returns.png`**:
+  - **What it shows:** Total cumulative return vs. its components (Price PnL and Funding PnL).
+  - **What to look for:** Ideally, **Funding PnL (green/dashed)** should drive the total return. **Price PnL (blue/dashed)** should be relatively flat or oscillate around zero, indicating effective hedging.
+
+- **`exposures.png`**:
+  - **What it shows:** Gross and Net leverage over time, and the breakdown of Long vs. Short positions.
+  - **What to look for:** **Net Exposure** should stay close to zero (market neutral). **Gross Exposure** shows your total leverage utilization.
+
+- **`drawdown.png`**:
+  - **What it shows:** The percentage decline from the strategy's historical peak equity.
+  - **What to look for:** Periods of deep drawdowns indicate risks (e.g., correlation breakdowns, liquidation cascades).
+
+- **`weighted_beta.png` (Ex-Ante)**:
+  - **What it shows:** The portfolio's expected beta *before* trades were executed, based on historical data.
+  - **What to look for:** This should be extremely close to 0.0, confirming the optimizer satisfied the neutrality constraints.
+
+- **`ex_post_beta.png` (Realized)**:
+  - **What it shows:** The actual **Rolling 30-Day Beta** of the strategy's *Price Return* against BTC.
+  - **What to look for:** This measures "beta slippage." Ideally, it should hover near 0. If it deviates significantly (e.g., > 0.3 or < -0.3), the historical beta estimates failed to predict future correlations.
+
+- **`hedging_efficiency.png`**:
+  - **What it shows:** Overlays the Rolling Realized Beta against the Cumulative Price PnL. Red shaded regions indicate days where `|Beta| > 0.3`.
+  - **What to look for:** Use this to check if large losses in Price PnL align with periods of high realized beta (hedging failure). If Price PnL drops while Beta is high, market exposure caused the loss.
 
 ## Strategy Configuration
 

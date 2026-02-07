@@ -143,6 +143,27 @@ def generate_report():
         lines.append(f"Correlation (vs BTC):   {correlation:.4f}")
     lines.append(f"Avg Daily Weighted Beta: {daily_stats['weighted_beta'].mean():.4f}")
     lines.append("-" * 30)
+    lines.append("HEDGING EFFICIENCY")
+    if 'rolling_ex_post_beta' in daily_stats.columns:
+        # Correlation of Beta vs Price Return
+        # We expect this to be non-zero if hedging is imperfect
+        # Ideally, it should be 0. Positive correlation means we are long beta when market is up? 
+        # Actually, if we are hedged, it should be 0.
+        
+        # 1. Overall
+        corr_overall = daily_stats['rolling_ex_post_beta'].corr(daily_stats['price_return'])
+        lines.append(f"Corr(Beta, Price PnL):          {corr_overall:.4f}")
+        
+        # 2. High Beta Regime (> 0.3)
+        high_beta_mask = daily_stats['rolling_ex_post_beta'].abs() > 0.3
+        if high_beta_mask.any():
+            corr_high_beta = daily_stats.loc[high_beta_mask, 'rolling_ex_post_beta'].corr(daily_stats.loc[high_beta_mask, 'price_return'])
+            lines.append(f"Corr(Beta, Price PnL) [|B|>0.3]: {corr_high_beta:.4f}")
+            lines.append(f"  Days with |Beta| > 0.3:       {high_beta_mask.sum()}")
+        else:
+            lines.append(f"Corr(Beta, Price PnL) [|B|>0.3]: N/A (No high beta days)")
+            
+    lines.append("-" * 30)
     lines.append("EXPOSURE (Average)")
     lines.append(f"Gross Exposure:     {daily_stats['gross_exposure'].mean():.2f}")
     lines.append(f"Net Exposure:       {daily_stats['net_exposure'].mean():.2f}")
@@ -264,6 +285,46 @@ def generate_report():
             
             fig.tight_layout()
             fig.savefig('figures/ex_post_beta.png', dpi=300)
+            plt.close(fig)
+
+        # F. Hedging Efficiency Overlay (Beta vs Price PnL)
+        if 'rolling_ex_post_beta' in daily_stats.columns and daily_stats['rolling_ex_post_beta'].notna().any():
+            fig, ax1 = plt.subplots(figsize=(12, 6))
+            
+            # Plot Beta on Left Axis
+            color = 'darkorange'
+            ax1.set_xlabel('Date')
+            ax1.set_ylabel('Rolling 30d Beta', color=color)
+            ax1.plot(daily_stats.index, daily_stats['rolling_ex_post_beta'], color=color, label='Rolling Beta')
+            ax1.tick_params(axis='y', labelcolor=color)
+            ax1.axhline(0, color='black', linestyle='--', linewidth=0.8, alpha=0.5)
+            
+            # Highlight High Beta Regions (|Beta| > 0.3)
+            # Create a boolean mask and fill
+            high_beta_mask = daily_stats['rolling_ex_post_beta'].abs() > 0.3
+            # We use fill_between with the transform=ax1.get_xaxis_transform() to span whole Y? 
+            # Or just use ylim. Let's just fill based on x-axis intervals.
+            # A simple way is to fill where condition is true
+            ylim = ax1.get_ylim()
+            ax1.fill_between(daily_stats.index, ylim[0], ylim[1], where=high_beta_mask, color='red', alpha=0.1, label='|Beta| > 0.3')
+            ax1.set_ylim(ylim) # Restore limits
+
+            # Plot Price PnL on Right Axis
+            ax2 = ax1.twinx()  
+            color = 'gray'
+            cum_price_pnl = daily_stats['price_return'].cumsum()
+            ax2.set_ylabel('Cumulative Price PnL', color=color)  
+            ax2.plot(daily_stats.index, cum_price_pnl, color=color, alpha=0.6, linewidth=1.5, label='Cum. Price PnL')
+            ax2.tick_params(axis='y', labelcolor=color)
+
+            # Combined Legend
+            lines1, labels1 = ax1.get_legend_handles_labels()
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+
+            plt.title('Hedging Efficiency: Realized Beta vs Price PnL')
+            fig.tight_layout()
+            fig.savefig('figures/hedging_efficiency.png', dpi=300)
             plt.close(fig)
 
         print("Figures saved to 'figures/' directory.")

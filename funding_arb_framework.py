@@ -1173,6 +1173,7 @@ class FundingWalkForwardRunner:
             best_params_df["best_min_weight"] = best_params_df["best_params"].apply(lambda p: getattr(p, "min_weight", None))
             best_params_df["best_use_shrinkage"] = best_params_df["best_params"].apply(lambda p: getattr(p, "use_shrinkage", None))
             best_params_df["best_prior_beta_window"] = best_params_df["best_params"].apply(lambda p: getattr(p, "prior_beta_window", None))
+            best_params_df["best_gross_exposure"] = best_params_df["best_params"].apply(lambda p: getattr(p, "gross_exposure_limit", None))
             # best_params_df["best_use_ar"] = best_params_df["best_params"].apply(lambda p: getattr(p, "use_ar_model", None))
 
             print("\\nParameter Selection Counts:")
@@ -1184,6 +1185,7 @@ class FundingWalkForwardRunner:
             print("Min weight selection:\\n", best_params_df["best_min_weight"].value_counts().sort_index())
             print("Use shrinkage selection:\\n", best_params_df["best_use_shrinkage"].value_counts().sort_index())
             print("Prior beta window selection:\\n", best_params_df["best_prior_beta_window"].value_counts().sort_index())
+            print("Gross exposure limit selection:\\n", best_params_df["best_gross_exposure"].value_counts().sort_index())
 
             out["best_params_df"] = best_params_df
         else:
@@ -1345,7 +1347,7 @@ class FundingWalkForwardRunner:
                 # B. Parameter Selection
                 if "best_params_df" in out:
                     bp = out["best_params_df"]
-                    fig, axes = plt.subplots(4, 2, figsize=(12, 16))
+                    fig, axes = plt.subplots(5, 2, figsize=(12, 20))
                     plots = [
                         ("best_ar_window", "AR Window"),
                         ("best_beta_window", "Beta Window"),
@@ -1355,12 +1357,20 @@ class FundingWalkForwardRunner:
                         ("best_min_weight", "Min Weight"),
                         ("best_use_shrinkage", "Use Shrinkage"),
                         ("best_prior_beta_window", "Prior Beta Window"),
+                        ("best_gross_exposure", "Gross Exposure Limit"),
                     ]
-                    for ax, (col, title) in zip(axes.flatten(), plots):
-                        if col in bp.columns:
-                            bp[col].value_counts().sort_index().plot(kind="bar", ax=ax, color="tab:blue")
-                            ax.set_title(title)
-                            ax.grid(alpha=0.3)
+                    
+                    flat_axes = axes.flatten()
+                    for i, ax in enumerate(flat_axes):
+                        if i < len(plots):
+                            col, title = plots[i]
+                            if col in bp.columns:
+                                bp[col].value_counts().sort_index().plot(kind="bar", ax=ax, color="tab:blue")
+                                ax.set_title(title)
+                                ax.grid(alpha=0.3)
+                        else:
+                            ax.axis('off')
+                            
                     plt.tight_layout()
                     if fig_path:
                         fig.savefig(fig_path / "parameter_counts.png", dpi=150)
