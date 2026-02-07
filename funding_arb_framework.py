@@ -331,6 +331,7 @@ class FundingArbParams:
     use_shrinkage: bool = False  # Whether to use beta shrinkage
     prior_beta_window: int = 60  # Lookback for prior beta (target)
     min_volume: float = 0.0      # Minimum 30-day rolling average daily dollar volume
+    beta_neutral: bool = True    # Whether to enforce beta neutrality
 
 class FundingArbStrategy(Strategy):
     """
@@ -622,8 +623,10 @@ class BetaNeutralWeighting(WeightingModel):
                     
                     # Portfolio Constraints
                     cvx.sum(w_pos + w_neg) <= 1.0, # Gross Exposure hardcoded to 1.0
-                    cvx.abs(b_opt @ w) <= params.beta_limit                # Beta Neutral
                 ]
+                
+                if params.beta_neutral:
+                     constraints.append(cvx.abs(b_opt @ w) <= params.beta_limit) # Beta Neutral
                 
                 objective = cvx.Maximize(-s_opt @ w)
                 prob = cvx.Problem(objective, constraints)
@@ -637,10 +640,12 @@ class BetaNeutralWeighting(WeightingModel):
                 objective = cvx.Maximize(-s_opt @ w)
                 
                 constraints = [
-                    cvx.abs(b_opt @ w) <= params.beta_limit, # Beta neutral
                     cvx.norm1(w) <= 1.0, # Leverage limit hardcoded to 1.0
                     cvx.abs(w) <= params.gross_exposure_limit # Individual asset cap
                 ]
+                
+                if params.beta_neutral:
+                     constraints.append(cvx.abs(b_opt @ w) <= params.beta_limit) # Beta neutral
                 
                 prob = cvx.Problem(objective, constraints)
                 prob.solve(solver=cvx.CLARABEL, verbose=False)
@@ -1174,18 +1179,20 @@ class FundingWalkForwardRunner:
             best_params_df["best_use_shrinkage"] = best_params_df["best_params"].apply(lambda p: getattr(p, "use_shrinkage", None))
             best_params_df["best_prior_beta_window"] = best_params_df["best_params"].apply(lambda p: getattr(p, "prior_beta_window", None))
             best_params_df["best_gross_exposure"] = best_params_df["best_params"].apply(lambda p: getattr(p, "gross_exposure_limit", None))
+            best_params_df["best_beta_neutral"] = best_params_df["best_params"].apply(lambda p: getattr(p, "beta_neutral", None))
             # best_params_df["best_use_ar"] = best_params_df["best_params"].apply(lambda p: getattr(p, "use_ar_model", None))
 
-            print("\\nParameter Selection Counts:")
-            print("AR window selection:\\n", best_params_df["best_ar_window"].value_counts().sort_index())
-            print("Beta window selection:\\n", best_params_df["best_beta_window"].value_counts().sort_index())
-            print("Portfolio size selection:\\n", best_params_df["best_portfolio_size"].value_counts().sort_index())
-            print("Beta type selection:\\n", best_params_df["best_beta_type"].value_counts().sort_index())
-            print("Min positions selection:\\n", best_params_df["best_min_positions"].value_counts().sort_index())
-            print("Min weight selection:\\n", best_params_df["best_min_weight"].value_counts().sort_index())
-            print("Use shrinkage selection:\\n", best_params_df["best_use_shrinkage"].value_counts().sort_index())
-            print("Prior beta window selection:\\n", best_params_df["best_prior_beta_window"].value_counts().sort_index())
-            print("Gross exposure limit selection:\\n", best_params_df["best_gross_exposure"].value_counts().sort_index())
+            print("\nParameter Selection Counts:")
+            print("AR window selection:\n", best_params_df["best_ar_window"].value_counts().sort_index())
+            print("Beta window selection:\n", best_params_df["best_beta_window"].value_counts().sort_index())
+            print("Portfolio size selection:\n", best_params_df["best_portfolio_size"].value_counts().sort_index())
+            print("Beta type selection:\n", best_params_df["best_beta_type"].value_counts().sort_index())
+            print("Min positions selection:\n", best_params_df["best_min_positions"].value_counts().sort_index())
+            print("Min weight selection:\n", best_params_df["best_min_weight"].value_counts().sort_index())
+            print("Use shrinkage selection:\n", best_params_df["best_use_shrinkage"].value_counts().sort_index())
+            print("Prior beta window selection:\n", best_params_df["best_prior_beta_window"].value_counts().sort_index())
+            print("Gross exposure limit selection:\n", best_params_df["best_gross_exposure"].value_counts().sort_index())
+            print("Beta neutral selection:\n", best_params_df["best_beta_neutral"].value_counts().sort_index())
 
             out["best_params_df"] = best_params_df
         else:
@@ -1358,6 +1365,7 @@ class FundingWalkForwardRunner:
                         ("best_use_shrinkage", "Use Shrinkage"),
                         ("best_prior_beta_window", "Prior Beta Window"),
                         ("best_gross_exposure", "Gross Exposure Limit"),
+                        ("best_beta_neutral", "Beta Neutral"),
                     ]
                     
                     flat_axes = axes.flatten()
