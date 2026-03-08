@@ -62,6 +62,7 @@ def generate_report():
         })
 
     daily_stats = df.groupby('date').apply(agg_daily).sort_index()
+    daily_stats['strategy_return'] = daily_stats['strategy_return'] - 0.0005
     
     # Initialize column for ex-post beta
     daily_stats['rolling_ex_post_beta'] = np.nan

@@ -24,3 +24,14 @@ test_shrinkage_calculation.py
 test_shrinkage_integration.py
 test_volume_filter.py
 vertox_version.ipynb
+update_notebook.py
+test_mvo_weighting.py
+test_mvo_cov.py
+research_proposal.tex
+research_proposal.synctex.gz
+research_proposal.pdf
+research_proposal.out
+research_proposal.log
+research_proposal.fls
+research_proposal.fdb_latexmk
+research_proposal.aux

@@ -332,6 +332,11 @@ class FundingArbParams:
     prior_beta_window: int = 60  # Lookback for prior beta (target)
     min_volume: float = 0.0      # Minimum 30-day rolling average daily dollar volume
     beta_neutral: bool = True    # Whether to enforce beta neutrality
+    # MVO Parameters
+    cov_window_short: int = 7    # Short-term lookback for covariance (days)
+    cov_window_long: int = 30    # Long-term lookback for covariance (days)
+    cov_shrinkage_weight: float = 0.5 # Weight for short-term covariance
+    risk_aversion: float = 1.0   # Risk aversion penalty factor (lambda)
 
 class FundingArbStrategy(Strategy):
     """
@@ -495,6 +500,11 @@ class FundingArbStrategy(Strategy):
                     beta = raw_beta
             else:
                 beta = np.full(len(bundle.tickers), np.nan)
+        
+        # Clip beta estimates to range (0, 4)
+        if beta is not None:
+            # np.clip handles arrays and single values
+            beta = np.clip(beta, -4.0, 4.0)
             
         return {
             "alpha": alpha, 
@@ -660,6 +670,181 @@ class BetaNeutralWeighting(WeightingModel):
             full_weights[trade_indices] = w_res
             
             # Cleanup small weights (though MIP should handle min_weight strictly)
+            full_weights[np.abs(full_weights) < EPS] = 0.0
+            
+            return full_weights
+            
+        except Exception as e:
+            # print(f"Optimization failed at {idx}: {e}")
+            return np.zeros(len(bundle.tickers))
+
+
+class MVOBetaNeutralWeighting(WeightingModel):
+    """
+    Solves Mean-Variance Optimization problem:
+    Maximize Expected Funding - lambda * Variance
+    Subject to:
+      - Beta Neutrality
+      - Gross Exposure <= 1
+      - Top/Bottom K selection
+    """
+    
+    def weights(
+        self,
+        idx: int,
+        signals: Dict[str, Any],
+        bundle: FundingDataBundle,
+        universe_mask: np.ndarray,
+        params: FundingArbParams,
+    ) -> np.ndarray:
+        
+        alpha = signals["alpha"] # predicted funding
+        beta = signals["beta"]
+        
+        # Filter valid data
+        mask = universe_mask & np.isfinite(beta)
+        available_indices = np.nonzero(mask)[0]
+        
+        if len(available_indices) < 2 * params.portfolio_size_each_side:
+            return np.zeros(len(bundle.tickers))
+        
+        alpha_sub = np.nan_to_num(alpha[available_indices], nan=0.0)
+            
+        # Select Universe: Top K and Bottom K by predicted funding
+        sorted_args_desc = np.argsort(-alpha_sub)
+        
+        k = params.portfolio_size_each_side
+        
+        top_k_local = sorted_args_desc[:k]
+        bottom_k_local = sorted_args_desc[-k:]
+        
+        selected_local = np.union1d(top_k_local, bottom_k_local)
+        trade_indices = available_indices[selected_local]
+        
+        if len(trade_indices) == 0:
+            return np.zeros(len(bundle.tickers))
+        
+        trade_symbols = [bundle.tickers[j] for j in trade_indices]
+        sorted_order = np.argsort(trade_symbols)
+        trade_indices = trade_indices[sorted_order]
+        trade_symbols = [bundle.tickers[j] for j in trade_indices]
+            
+        s_opt = np.nan_to_num(alpha[trade_indices], nan=0.0)
+        b_opt = np.nan_to_num(beta[trade_indices], nan=0.0)
+        n_opt = len(trade_indices)
+        
+        # Calculate HF Covariance
+        current_date = pd.Timestamp(bundle.dates[idx])
+        if bundle.returns_df_hf is not None:
+            # Extract HF returns up to current_date for the selected symbols
+            hf_rets_all = bundle.returns_df_hf.loc[:current_date]
+            
+            # To ensure we don't hit key errors, filter to only available columns
+            valid_symbols = [s for s in trade_symbols if s in hf_rets_all.columns]
+            
+            if len(valid_symbols) == len(trade_symbols):
+                hf_rets = hf_rets_all[trade_symbols]
+                
+                long_bars = params.cov_window_long * bundle.hf_window_multiplier
+                short_bars = params.cov_window_short * bundle.hf_window_multiplier
+                
+                # Check if we have enough data, fallback to zeros if not
+                if len(hf_rets) > 0:
+                    rets_long = hf_rets.iloc[-long_bars:].ffill().fillna(0.0)
+                    rets_short = hf_rets.iloc[-short_bars:].ffill().fillna(0.0)
+                    
+                    cov_long = rets_long.cov().values * bundle.hf_window_multiplier
+                    cov_short = rets_short.cov().values * bundle.hf_window_multiplier
+                    
+                    Sigma = params.cov_shrinkage_weight * cov_short + (1 - params.cov_shrinkage_weight) * cov_long
+                else:
+                    Sigma = np.eye(n_opt) * 1e-8
+            else:
+                # Fallback if somehow symbols are missing from HF returns
+                Sigma = np.eye(n_opt) * 1e-8
+        else:
+            # Fallback if no HF data provided
+            Sigma = np.eye(n_opt) * 1e-8
+            
+        # Ensure Positive Semi-Definite
+        Sigma += np.eye(n_opt) * 1e-8
+        
+        # CVXPY Problem
+        try:
+            use_mip = (params.min_positions > 0) or (params.min_weight > 0)
+            
+            if use_mip:
+                if n_opt < params.min_positions:
+                     return np.zeros(len(bundle.tickers))
+
+                w_pos = cvx.Variable(n_opt, nonneg=True)
+                w_neg = cvx.Variable(n_opt, nonneg=True)
+                z_pos = cvx.Variable(n_opt, boolean=True)
+                z_neg = cvx.Variable(n_opt, boolean=True)
+                
+                w = w_pos - w_neg
+                
+                M = params.gross_exposure_limit
+                min_w = params.min_weight
+                
+                constraints = [
+                    w_pos <= z_pos * M,
+                    w_neg <= z_neg * M,
+                    w_pos >= z_pos * min_w,
+                    w_neg >= z_neg * min_w,
+                    z_pos + z_neg <= 1,
+                    cvx.sum(z_pos + z_neg) >= params.min_positions,
+                    cvx.sum(w_pos + w_neg) <= 1.0,
+                ]
+                
+                if params.beta_neutral:
+                     constraints.append(cvx.abs(b_opt @ w) <= params.beta_limit)
+                
+                # QP Objective
+                objective = cvx.Maximize(-s_opt @ w - params.risk_aversion * cvx.quad_form(w, Sigma))
+                prob = cvx.Problem(objective, constraints)
+                
+                # First try MIQP solver
+                try:
+                    prob.solve(solver=cvx.SCIPY, verbose=False)
+                except Exception as e:
+                    #print(f"[Fallback] MIQP failed at idx {idx} ({current_date.date()}). Falling back to continuous QP. Error: {e}")
+                    # Fallback to continuous QP if MIQP fails
+                    w = cvx.Variable(n_opt)
+                    constraints = [
+                        cvx.norm1(w) <= 1.0,
+                        cvx.abs(w) <= params.gross_exposure_limit
+                    ]
+                    if params.beta_neutral:
+                         constraints.append(cvx.abs(b_opt @ w) <= params.beta_limit)
+                    objective = cvx.Maximize(-s_opt @ w - params.risk_aversion * cvx.quad_form(w, Sigma))
+                    prob = cvx.Problem(objective, constraints)
+                    prob.solve(solver=cvx.CLARABEL, verbose=False)
+                
+            else:
+                # Standard QP (Continuous)
+                w = cvx.Variable(n_opt)
+                objective = cvx.Maximize(-s_opt @ w - params.risk_aversion * cvx.quad_form(w, Sigma))
+                
+                constraints = [
+                    cvx.norm1(w) <= 1.0,
+                    cvx.abs(w) <= params.gross_exposure_limit
+                ]
+                
+                if params.beta_neutral:
+                     constraints.append(cvx.abs(b_opt @ w) <= params.beta_limit)
+                
+                prob = cvx.Problem(objective, constraints)
+                # CLARABEL handles QP very well
+                prob.solve(solver=cvx.CLARABEL, verbose=False)
+            
+            if w.value is None:
+                return np.zeros(len(bundle.tickers))
+                
+            w_res = w.value
+            
+            full_weights = np.zeros(len(bundle.tickers))
+            full_weights[trade_indices] = w_res
             full_weights[np.abs(full_weights) < EPS] = 0.0
             
             return full_weights
@@ -946,6 +1131,7 @@ class FundingWalkForwardRunner:
         score_mode: str = "sharpe",
         mode: str = "expanding",
         periods_per_year: float = PERIODS_PER_YEAR,
+        weighting_cls: Any = BetaNeutralWeighting,
     ):
         self.bundle = bundle
         self.params_grid = params_grid
@@ -958,7 +1144,7 @@ class FundingWalkForwardRunner:
         
         # We use a single strategy class
         self.strategy_cls = FundingArbStrategy
-        self.weighting_cls = BetaNeutralWeighting
+        self.weighting_cls = weighting_cls
         
     def run(self) -> Tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.Series, pd.DataFrame, pd.DataFrame]:
         all_dates = self.bundle.dates
@@ -1180,6 +1366,10 @@ class FundingWalkForwardRunner:
             best_params_df["best_prior_beta_window"] = best_params_df["best_params"].apply(lambda p: getattr(p, "prior_beta_window", None))
             best_params_df["best_gross_exposure"] = best_params_df["best_params"].apply(lambda p: getattr(p, "gross_exposure_limit", None))
             best_params_df["best_beta_neutral"] = best_params_df["best_params"].apply(lambda p: getattr(p, "beta_neutral", None))
+            best_params_df["best_cov_window_short"] = best_params_df["best_params"].apply(lambda p: getattr(p, "cov_window_short", None))
+            best_params_df["best_cov_window_long"] = best_params_df["best_params"].apply(lambda p: getattr(p, "cov_window_long", None))
+            best_params_df["best_cov_shrinkage_weight"] = best_params_df["best_params"].apply(lambda p: getattr(p, "cov_shrinkage_weight", None))
+            best_params_df["best_risk_aversion"] = best_params_df["best_params"].apply(lambda p: getattr(p, "risk_aversion", None))
             # best_params_df["best_use_ar"] = best_params_df["best_params"].apply(lambda p: getattr(p, "use_ar_model", None))
 
             print("\nParameter Selection Counts:")
@@ -1354,7 +1544,7 @@ class FundingWalkForwardRunner:
                 # B. Parameter Selection
                 if "best_params_df" in out:
                     bp = out["best_params_df"]
-                    fig, axes = plt.subplots(5, 2, figsize=(12, 20))
+                    fig, axes = plt.subplots(7, 2, figsize=(12, 28))
                     plots = [
                         ("best_ar_window", "AR Window"),
                         ("best_beta_window", "Beta Window"),
@@ -1366,6 +1556,10 @@ class FundingWalkForwardRunner:
                         ("best_prior_beta_window", "Prior Beta Window"),
                         ("best_gross_exposure", "Gross Exposure Limit"),
                         ("best_beta_neutral", "Beta Neutral"),
+                        ("best_cov_window_short", "Cov Window Short"),
+                        ("best_cov_window_long", "Cov Window Long"),
+                        ("best_cov_shrinkage_weight", "Cov Shrinkage Weight"),
+                        ("best_risk_aversion", "Risk Aversion"),
                     ]
                     
                     flat_axes = axes.flatten()

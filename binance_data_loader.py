@@ -158,7 +158,7 @@ class BinanceDataLoader:
                         break
                 
                 # Skip futures contracts and weird symbols
-                if any(skip in symbol for skip in ['_250926', '_251226', 'BTCDOM', 'USDCUSDT']):
+                if any(skip in symbol for skip in ['_250926', '_251226', 'BTCDOM', 'USDCUSDT','USTCUSDT']):
                     continue
                 
                 # Load individual file
