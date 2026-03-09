@@ -501,7 +501,7 @@ class FundingArbStrategy(Strategy):
             else:
                 beta = np.full(len(bundle.tickers), np.nan)
         
-        # Clip beta estimates to range (0, 4)
+        # Clip beta estimates to range (-4, 4)
         if beta is not None:
             # np.clip handles arrays and single values
             beta = np.clip(beta, -4.0, 4.0)
@@ -597,16 +597,15 @@ class BetaNeutralWeighting(WeightingModel):
         
         # CVXPY Problem
         try:
-            # Check if we need MIP (Minimum Positions or Minimum Weight)
-            use_mip = (params.min_positions > 0) or (params.min_weight > 0)
+            # Check if we need MIP (Minimum Positions only)
+            use_mip = params.min_positions > 0
             
             if use_mip:
                 # If we need more positions than available candidates, return 0 early
                 if n_opt < params.min_positions:
                      return np.zeros(len(bundle.tickers))
 
-                # MIP Formulation
-                # Split into positive and negative components to handle |w| constraints linearly
+                # MIP Formulation (linear) solved with ECOS_BB (supports boolean vars)
                 w_pos = cvx.Variable(n_opt, nonneg=True)
                 w_neg = cvx.Variable(n_opt, nonneg=True)
                 z_pos = cvx.Variable(n_opt, boolean=True)
@@ -616,14 +615,10 @@ class BetaNeutralWeighting(WeightingModel):
                 
                 # Big-M: Max weight for any single asset is gross_exposure_limit
                 M = params.gross_exposure_limit
-                min_w = params.min_weight
-                
                 constraints = [
                     # Link continuous and binary (Semi-continuous constraints)
                     w_pos <= z_pos * M,
                     w_neg <= z_neg * M,
-                    w_pos >= z_pos * min_w,
-                    w_neg >= z_neg * min_w,
                     
                     # Mutually exclusive: An asset cannot be both long and short
                     z_pos + z_neg <= 1,
@@ -636,13 +631,14 @@ class BetaNeutralWeighting(WeightingModel):
                 ]
                 
                 if params.beta_neutral:
-                     constraints.append(cvx.abs(b_opt @ w) <= params.beta_limit) # Beta Neutral
+                     constraints.append(b_opt @ w <= params.beta_limit)  # Beta Neutral
+                     constraints.append(b_opt @ w >= -params.beta_limit)
                 
                 objective = cvx.Maximize(-s_opt @ w)
                 prob = cvx.Problem(objective, constraints)
                 
-                # Use SCIPY (Highs) solver for MIP
-                prob.solve(solver=cvx.SCIPY, verbose=False)
+                # ECOS_BB supports MILP; avoid SCIPY which ignores booleans
+                prob.solve(solver=cvx.ECOS_BB, verbose=False)
                 
             else:
                 # Standard LP (Convex)
@@ -655,12 +651,14 @@ class BetaNeutralWeighting(WeightingModel):
                 ]
                 
                 if params.beta_neutral:
-                     constraints.append(cvx.abs(b_opt @ w) <= params.beta_limit) # Beta neutral
+                     constraints.append(b_opt @ w <= params.beta_limit)  # Beta neutral
+                     constraints.append(b_opt @ w >= -params.beta_limit)
                 
                 prob = cvx.Problem(objective, constraints)
                 prob.solve(solver=cvx.CLARABEL, verbose=False)
             
             if w.value is None:
+                print(f"[BetaNeutralWeighting] Optimizer failed to find solution at index {idx} - returned None")
                 return np.zeros(len(bundle.tickers))
                 
             w_res = w.value
@@ -675,7 +673,7 @@ class BetaNeutralWeighting(WeightingModel):
             return full_weights
             
         except Exception as e:
-            # print(f"Optimization failed at {idx}: {e}")
+            print(f"[BetaNeutralWeighting] Optimization failed at {idx}: {e}")
             return np.zeros(len(bundle.tickers))
 
 
@@ -771,74 +769,27 @@ class MVOBetaNeutralWeighting(WeightingModel):
         
         # CVXPY Problem
         try:
-            use_mip = (params.min_positions > 0) or (params.min_weight > 0)
-            
-            if use_mip:
-                if n_opt < params.min_positions:
-                     return np.zeros(len(bundle.tickers))
+            if params.min_positions > 0 and n_opt < params.min_positions:
+                return np.zeros(len(bundle.tickers))
 
-                w_pos = cvx.Variable(n_opt, nonneg=True)
-                w_neg = cvx.Variable(n_opt, nonneg=True)
-                z_pos = cvx.Variable(n_opt, boolean=True)
-                z_neg = cvx.Variable(n_opt, boolean=True)
-                
-                w = w_pos - w_neg
-                
-                M = params.gross_exposure_limit
-                min_w = params.min_weight
-                
-                constraints = [
-                    w_pos <= z_pos * M,
-                    w_neg <= z_neg * M,
-                    w_pos >= z_pos * min_w,
-                    w_neg >= z_neg * min_w,
-                    z_pos + z_neg <= 1,
-                    cvx.sum(z_pos + z_neg) >= params.min_positions,
-                    cvx.sum(w_pos + w_neg) <= 1.0,
-                ]
-                
-                if params.beta_neutral:
-                     constraints.append(cvx.abs(b_opt @ w) <= params.beta_limit)
-                
-                # QP Objective
-                objective = cvx.Maximize(-s_opt @ w - params.risk_aversion * cvx.quad_form(w, Sigma))
-                prob = cvx.Problem(objective, constraints)
-                
-                # First try MIQP solver
-                try:
-                    prob.solve(solver=cvx.SCIPY, verbose=False)
-                except Exception as e:
-                    #print(f"[Fallback] MIQP failed at idx {idx} ({current_date.date()}). Falling back to continuous QP. Error: {e}")
-                    # Fallback to continuous QP if MIQP fails
-                    w = cvx.Variable(n_opt)
-                    constraints = [
-                        cvx.norm1(w) <= 1.0,
-                        cvx.abs(w) <= params.gross_exposure_limit
-                    ]
-                    if params.beta_neutral:
-                         constraints.append(cvx.abs(b_opt @ w) <= params.beta_limit)
-                    objective = cvx.Maximize(-s_opt @ w - params.risk_aversion * cvx.quad_form(w, Sigma))
-                    prob = cvx.Problem(objective, constraints)
-                    prob.solve(solver=cvx.CLARABEL, verbose=False)
-                
-            else:
-                # Standard QP (Continuous)
-                w = cvx.Variable(n_opt)
-                objective = cvx.Maximize(-s_opt @ w - params.risk_aversion * cvx.quad_form(w, Sigma))
-                
-                constraints = [
-                    cvx.norm1(w) <= 1.0,
-                    cvx.abs(w) <= params.gross_exposure_limit
-                ]
-                
-                if params.beta_neutral:
-                     constraints.append(cvx.abs(b_opt @ w) <= params.beta_limit)
-                
-                prob = cvx.Problem(objective, constraints)
-                # CLARABEL handles QP very well
-                prob.solve(solver=cvx.CLARABEL, verbose=False)
+            # Standard QP (Continuous)
+            w = cvx.Variable(n_opt)
+            objective = cvx.Maximize(-s_opt @ w - params.risk_aversion * cvx.quad_form(w, Sigma))
+            
+            constraints = [
+                cvx.norm1(w) <= 1.0,
+                cvx.abs(w) <= params.gross_exposure_limit
+            ]
+            
+            if params.beta_neutral:
+                 constraints.append(b_opt @ w <= params.beta_limit)   # Beta neutral
+                 constraints.append(b_opt @ w >= -params.beta_limit)
+            
+            prob = cvx.Problem(objective, constraints)
+            prob.solve(solver=cvx.CLARABEL, verbose=False)
             
             if w.value is None:
+                print(f"[MVOBetaNeutralWeighting] Optimizer failed to find solution at index {idx} - returned None")
                 return np.zeros(len(bundle.tickers))
                 
             w_res = w.value
@@ -850,7 +801,7 @@ class MVOBetaNeutralWeighting(WeightingModel):
             return full_weights
             
         except Exception as e:
-            # print(f"Optimization failed at {idx}: {e}")
+            print(f"[MVOBetaNeutralWeighting] Optimization failed at {idx}: {e}")
             return np.zeros(len(bundle.tickers))
 
 
@@ -949,8 +900,8 @@ class FundingBacktestEngine:
         
         b = self.bundle
         n_dates = len(b.dates)
-        if end_idx is None or end_idx >= n_dates:
-            end_idx = n_dates - 1
+        if end_idx is None or end_idx > n_dates:
+            end_idx = n_dates
             
         equity_path = []
         return_path = []
@@ -1174,12 +1125,12 @@ class FundingWalkForwardRunner:
             
             train_end = current_end
             test_start = current_end
-            test_end_inclusive = min(current_end + self.test_span, total) - 1 
+            test_end_exclusive = min(current_end + self.test_span, total)
 
-            if test_end_inclusive < test_start:
+            if test_end_exclusive <= test_start:
                 break
                 
-            print(f"Iteration {iteration} ({self.mode.title()}): Train [{train_start}:{train_end}], Test [{test_start}:{test_end_inclusive}]")
+            print(f"Iteration {iteration} ({self.mode.title()}): Train [{train_start}:{train_end}], Test [{test_start}:{test_end_exclusive - 1}]")
             
             # 1. Optimize Params (Train)
             best_score = -np.inf
@@ -1213,7 +1164,7 @@ class FundingWalkForwardRunner:
             weight = self.weighting_cls()
             engine = FundingBacktestEngine(self.bundle, strat, weight, best_params)
             
-            _, ret_oos, price_ret_oos, funding_ret_oos, _, pos_oos, detailed_oos = engine.run(start_idx=test_start, end_idx=test_end_inclusive)
+            _, ret_oos, price_ret_oos, funding_ret_oos, _, pos_oos, detailed_oos = engine.run(start_idx=test_start, end_idx=test_end_exclusive)
             
             if not ret_oos.empty:
                 oos_returns_list.extend(ret_oos.values)
@@ -1243,7 +1194,7 @@ class FundingWalkForwardRunner:
                 "train_start": all_dates[train_start],
                 "train_end": all_dates[train_end],
                 "test_start": all_dates[test_start],
-                "test_end": all_dates[test_end_inclusive], 
+                "test_end": all_dates[test_end_exclusive - 1], 
                 "best_params": best_params,
                 "is_score": best_score,
                 "is_sharpe": best_sharpe,

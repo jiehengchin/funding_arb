@@ -2,7 +2,7 @@ __pycache__
 .pytest_cache
 data_1h_price
 data_fundingrate
-figures
+
 beta_estimation_01_granular.ipynb
 beta_neu_fund_arb_01.py
 binance_perp_categories_cg_with_sector.csv
